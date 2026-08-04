@@ -164,6 +164,8 @@ jobs:
 
           head="$(git rev-parse HEAD)"
           contents="$(base64 < "${CASK_FILE}" | tr -d '\n')"
+          # GraphQL variables must remain literal for GitHub to expand them.
+          # shellcheck disable=SC2016
           mutation='mutation(
             $repository: String!
             $branch: String!
