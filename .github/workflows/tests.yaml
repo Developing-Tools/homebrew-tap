@@ -23,14 +23,11 @@ jobs:
       - name: Check out tap and set up Homebrew
         uses: Homebrew/actions/setup-homebrew@5037c6f1012cc5ea0b9f03fedbaf9955ed9e51e0 # 2026.08.03.1
 
-      - name: Prepare test-bot
-        run: brew test-bot --only-setup
-
       - name: Check cask style explicitly
         run: brew style "${GITHUB_REPOSITORY/homebrew-/}"
 
       - name: Check cask syntax and style rules
-        run: brew test-bot --only-tap-syntax
+        run: brew test-bot --only-tap-syntax --skip-setup
 
   install-uninstall:
     name: Install and uninstall casks (${{ matrix.runner.name }})
