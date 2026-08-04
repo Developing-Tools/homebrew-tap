@@ -19,8 +19,9 @@ jobs:
       pull-requests: read
     outputs:
       branch: ${{ steps.release.outputs.branch }}
-      pr_exists: ${{ steps.pull_request.outputs.exists }}
+      recreate: ${{ steps.decision.outputs.recreate }}
       sha256: ${{ steps.release.outputs.sha256 }}
+      should_update: ${{ steps.decision.outputs.should_update }}
       version: ${{ steps.release.outputs.version }}
 
     steps:
@@ -70,38 +71,114 @@ jobs:
             echo "branch=automation/update-alacritty-${version}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Check for an existing pull request
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check current cask version
+        id: cask
+        shell: bash
+        env:
+          CASK_FILE: Casks/alacritty.rb
+          SHA256: ${{ steps.release.outputs.sha256 }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          current_version="$(sed -nE 's/^  version "([^"]+)"$/\1/p' "${CASK_FILE}")"
+          current_sha256="$(sed -nE 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "${CASK_FILE}")"
+          if [[ -z "${current_version}" || -z "${current_sha256}" ]]; then
+            echo "::error::Could not read the current Alacritty version and digest"
+            exit 1
+          fi
+
+          if [[ "${current_version}" == "${VERSION}" ]]; then
+            if [[ "${current_sha256}" != "${SHA256}" ]]; then
+              echo "::error::The digest changed for the existing Alacritty ${VERSION} release"
+              exit 1
+            fi
+
+            echo "matches=true" >>"${GITHUB_OUTPUT}"
+            echo "Alacritty ${VERSION} is already current."
+          else
+            echo "matches=false" >>"${GITHUB_OUTPUT}"
+            echo "Alacritty ${current_version} can be updated to ${VERSION}."
+          fi
+
+      - name: Check automated pull request
         id: pull_request
         shell: bash
         env:
           BRANCH: ${{ steps.release.outputs.branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
 
-          pr_url="$(
+          pull_request="$(
             gh pr list \
               --repo "${GITHUB_REPOSITORY}" \
               --head "${BRANCH}" \
               --state all \
               --limit 1 \
-              --json url \
-              --jq '.[0].url // empty'
+              --json state,url \
+              --jq '.[0] // {}'
           )"
 
-          if [[ -n "${pr_url}" ]]; then
-            echo "exists=true" >>"${GITHUB_OUTPUT}"
-            echo "Pull request already exists: ${pr_url}"
+          state="$(jq -r '.state // "NONE"' <<<"${pull_request}")"
+          url="$(jq -r '.url // empty' <<<"${pull_request}")"
+
+          echo "state=${state}" >>"${GITHUB_OUTPUT}"
+          if [[ "${state}" == "NONE" ]]; then
+            echo "No automated pull request exists."
           else
-            echo "exists=false" >>"${GITHUB_OUTPUT}"
-            echo "No pull request exists for Alacritty ${VERSION}."
+            echo "Automated pull request is ${state}: ${url}"
           fi
+
+      - name: Decide whether to update
+        id: decision
+        shell: bash
+        env:
+          CURRENT: ${{ steps.cask.outputs.matches }}
+          PR_STATE: ${{ steps.pull_request.outputs.state }}
+        run: |
+          set -euo pipefail
+
+          recreate=false
+          should_update=false
+
+          if [[ "${CURRENT}" == "true" ]]; then
+            echo "The cask is already current; no update is needed."
+          else
+            case "${PR_STATE}" in
+              NONE)
+                should_update=true
+                ;;
+              OPEN)
+                echo "The automated pull request is still open."
+                ;;
+              MERGED)
+                echo "The automated pull request was already merged."
+                ;;
+              CLOSED)
+                recreate=true
+                should_update=true
+                echo "The discarded pull request will be recreated."
+                ;;
+              *)
+                echo "::error::Unexpected pull request state: ${PR_STATE}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          {
+            echo "recreate=${recreate}"
+            echo "should_update=${should_update}"
+          } >>"${GITHUB_OUTPUT}"
 
   update:
     name: Update cask and open pull request
     needs: check
-    if: ${{ needs.check.outputs.pr_exists == 'false' }}
+    if: ${{ needs.check.outputs.should_update == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -115,6 +192,21 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
 
     steps:
+      - name: Delete discarded pull request branch
+        if: ${{ needs.check.outputs.recreate == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          get_ref="repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}"
+          delete_ref="repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}"
+          if gh api --silent "${get_ref}" 2>/dev/null; then
+            gh api --method DELETE "${delete_ref}"
+            echo "Deleted ${BRANCH}."
+          else
+            echo "Branch ${BRANCH} was already deleted."
+          fi
+
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
