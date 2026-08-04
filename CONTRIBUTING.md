@@ -3,6 +3,14 @@
 Thanks for helping maintain this custom tap. Contributions should be small,
 easy to review, and traceable to an upstream release or reproducible build.
 
+## Request a change
+
+If you are proposing a change without opening a pull request, use the
+[new-package request][new-package-issue] for a new cask, formula, or bottle, or
+the [package-update request][update-package-issue] for an existing one. Include
+the upstream release and artifact details requested by the template so the
+change can be implemented and verified without guessing.
+
 ## Choose your change
 
 | Package type | Definition or metadata | Pull request template |
@@ -161,5 +169,7 @@ checksums, reproducibility, or installed behavior.
 [bottles]: https://docs.brew.sh/Bottles
 [cask-cookbook]: https://docs.brew.sh/Cask-Cookbook
 [formula-cookbook]: https://docs.brew.sh/Formula-Cookbook
+[new-package-issue]: .github/ISSUE_TEMPLATE/new-package.md
 [new-package-template]: .github/PULL_REQUEST_TEMPLATE/new-package.md
+[update-package-issue]: .github/ISSUE_TEMPLATE/update-package.md
 [update-package-template]: .github/PULL_REQUEST_TEMPLATE/update-package.md
