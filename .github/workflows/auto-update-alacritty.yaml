@@ -1,0 +1,174 @@
+name: Update Alacritty cask
+
+on:
+  schedule:
+    - cron: "0 20 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: update-alacritty-cask
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      branch: ${{ steps.release.outputs.branch }}
+      pr_exists: ${{ steps.pull_request.outputs.exists }}
+      sha256: ${{ steps.release.outputs.sha256 }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Get latest release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPOSITORY: alacritty/alacritty
+        run: |
+          set -euo pipefail
+
+          release="$(
+            gh release view \
+              --repo "${UPSTREAM_REPOSITORY}" \
+              --json assets,tagName
+          )"
+          tag="$(jq -r '.tagName' <<<"${release}")"
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected release tag: ${tag}"
+            exit 1
+          fi
+
+          version="${tag#v}"
+          asset="Alacritty-v${version}.dmg"
+          mapfile -t digests < <(
+            jq -r --arg asset "${asset}" \
+              '.assets[] | select(.name == $asset) | .digest' \
+              <<<"${release}"
+          )
+
+          if (( ${#digests[@]} != 1 )); then
+            echo "::error::Expected exactly one ${asset} release asset"
+            exit 1
+          fi
+
+          digest="${digests[0]}"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid SHA-256 digest for ${asset}"
+            exit 1
+          fi
+
+          {
+            echo "version=${version}"
+            echo "sha256=${digest#sha256:}"
+            echo "branch=automation/update-alacritty-${version}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Check for an existing pull request
+        id: pull_request
+        shell: bash
+        env:
+          BRANCH: ${{ steps.release.outputs.branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          pr_url="$(
+            gh pr list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --head "${BRANCH}" \
+              --state all \
+              --limit 1 \
+              --json url \
+              --jq '.[0].url // empty'
+          )"
+
+          if [[ -n "${pr_url}" ]]; then
+            echo "exists=true" >>"${GITHUB_OUTPUT}"
+            echo "Pull request already exists: ${pr_url}"
+          else
+            echo "exists=false" >>"${GITHUB_OUTPUT}"
+            echo "No pull request exists for Alacritty ${VERSION}."
+          fi
+
+  update:
+    name: Update cask and open pull request
+    needs: check
+    if: ${{ needs.check.outputs.pr_exists == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: ${{ needs.check.outputs.branch }}
+      CASK_FILE: Casks/alacritty.rb
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SHA256: ${{ needs.check.outputs.sha256 }}
+      VERSION: ${{ needs.check.outputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Update cask
+        id: update
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_version="$(sed -nE 's/^  version "([^"]+)"$/\1/p' "${CASK_FILE}")"
+          current_sha256="$(sed -nE 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "${CASK_FILE}")"
+
+          if [[ "${current_version}" == "${VERSION}" ]]; then
+            if [[ "${current_sha256}" != "${SHA256}" ]]; then
+              echo "::error::The digest changed for the existing Alacritty ${VERSION} release"
+              exit 1
+            fi
+
+            echo "changed=false" >>"${GITHUB_OUTPUT}"
+            echo "Alacritty ${VERSION} is already current."
+          else
+            sed -i -E \
+              -e "s/^  version \"[^\"]+\"$/  version \"${VERSION}\"/" \
+              -e "s/^  sha256 \"[0-9a-f]{64}\"$/  sha256 \"${SHA256}\"/" \
+              "${CASK_FILE}"
+
+            if ! grep -Fqx "  version \"${VERSION}\"" "${CASK_FILE}" || \
+               ! grep -Fqx "  sha256 \"${SHA256}\"" "${CASK_FILE}"; then
+              echo "::error::Could not update ${CASK_FILE}"
+              exit 1
+            fi
+
+            git diff --check
+            echo "changed=true" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Commit update and open pull request
+        if: ${{ steps.update.outputs.changed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "${BRANCH}"
+          git add "${CASK_FILE}"
+          git commit -m "Update Alacritty to ${VERSION}"
+          git push --force-with-lease --set-upstream origin "${BRANCH}"
+
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "${BRANCH}" \
+            --title "Update Alacritty to ${VERSION}" \
+            --body "Automated update from the upstream Alacritty v${VERSION} release."

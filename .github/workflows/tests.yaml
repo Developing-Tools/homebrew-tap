@@ -1,0 +1,114 @@
+name: Cask checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  style:
+    name: Style and syntax
+    runs-on: macos-26
+
+    steps:
+      - name: Check out tap and set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@18fcb8e3e06b4247c676c506750dc95ea7226479 # 2026.07.13.1
+
+      - name: Prepare test-bot
+        run: brew test-bot --only-setup
+
+      - name: Check cask style explicitly
+        run: brew style "${GITHUB_REPOSITORY/homebrew-/}"
+
+      - name: Check cask syntax and style rules
+        run: brew test-bot --only-tap-syntax
+
+  install-uninstall:
+    name: Install and uninstall casks (${{ matrix.runner.name }})
+    needs: style
+    if: ${{ needs.style.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          # Intel Macs
+          - name: macOS 15 Sequoia (Intel)
+            label: macos-15-intel
+          - name: macOS 26 Tahoe (Intel)
+            label: macos-26-intel
+          # Apple Silicon Macs
+          - name: macOS 15 Sequoia (Apple Silicon)
+            label: macos-15
+          - name: macOS 26 Tahoe (Apple Silicon)
+            label: macos-26
+    runs-on: ${{ matrix.runner.label }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tap and set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@18fcb8e3e06b4247c676c506750dc95ea7226479 # 2026.07.13.1
+
+      - name: Install and uninstall each cask
+        shell: bash
+        run: |
+          shopt -s nullglob
+          cask_files=(Casks/*.rb)
+
+          if (( ${#cask_files[@]} == 0 )); then
+            echo "No casks found; nothing to install."
+            exit 0
+          fi
+
+          tap="${GITHUB_REPOSITORY/homebrew-/}"
+
+          for cask_file in "${cask_files[@]}"; do
+            cask="${cask_file##*/}"
+            cask="${cask%.rb}"
+
+            echo "Installing ${tap}/${cask}"
+            brew install --cask "${tap}/${cask}"
+
+            echo "Uninstalling ${tap}/${cask}"
+            brew uninstall --cask "${tap}/${cask}"
+          done
+
+  audit:
+    name: Strict cask audit
+    needs: style
+    if: ${{ needs.style.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out tap and set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@18fcb8e3e06b4247c676c506750dc95ea7226479 # 2026.07.13.1
+
+      - name: Audit each cask with strict rules
+        shell: bash
+        run: |
+          shopt -s nullglob
+          cask_files=(Casks/*.rb)
+
+          if (( ${#cask_files[@]} == 0 )); then
+            echo "No casks found; nothing to audit."
+            exit 0
+          fi
+
+          tap="${GITHUB_REPOSITORY/homebrew-/}"
+
+          for cask_file in "${cask_files[@]}"; do
+            cask="${cask_file##*/}"
+            cask="${cask%.rb}"
+
+            echo "Auditing ${tap}/${cask}"
+            brew audit --cask --strict "${tap}/${cask}"
+          done
